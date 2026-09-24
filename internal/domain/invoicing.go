@@ -49,6 +49,7 @@ type InvoiceDocument struct {
 	MimeType      string         `bson:"mime_type" json:"mime_type"`
 	XMLContent    string         `bson:"xml_content" json:"xml_content"`
 	PDFContent    string         `bson:"pdf_content,omitempty" json:"pdf_content,omitempty"`
+	ImageContent  string         `bson:"image_content,omitempty" json:"image_content,omitempty"` // photo of the paper note/receipt (JPEG/PNG), base64
 	SEFAZResponse map[string]any `bson:"sefaz_response" json:"sefaz_response"`
 	CreatedAt     time.Time      `bson:"created_at" json:"created_at"`
 }

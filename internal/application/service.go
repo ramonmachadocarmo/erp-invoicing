@@ -92,6 +92,10 @@ func (s *Service) Import(ctx context.Context, in domain.ImportFile) (domain.Invo
 		}
 		return s.importWithoutFile(ctx, in, po)
 	}
+	imgMime := imageMime(in.Content)
+	if imgMime != "" && len(in.Content) > maxImageBytes {
+		return domain.Invoice{}, domain.ErrInvalid
+	}
 	if !validImportFile(in.FileName, in.MimeType, in.Content) {
 		return domain.Invoice{}, domain.ErrInvalid
 	}
@@ -138,7 +142,12 @@ func (s *Service) Import(ctx context.Context, in domain.ImportFile) (domain.Invo
 			"xMotivo": "Documento importado",
 		},
 	}
-	if strings.Contains(strings.ToLower(in.FileName+in.MimeType), "pdf") {
+	if imgMime != "" {
+		// Photo of a paper note/receipt: nothing to parse, just keep the picture.
+		doc.ImageContent = base64.StdEncoding.EncodeToString(in.Content)
+		doc.MimeType = imgMime
+		doc.SEFAZResponse["xMotivo"] = "Foto de nota/recibo anexada"
+	} else if strings.Contains(strings.ToLower(in.FileName+in.MimeType), "pdf") {
 		doc.PDFContent = base64.StdEncoding.EncodeToString(in.Content)
 		doc.MimeType = "application/pdf"
 	} else {
@@ -173,7 +182,25 @@ func (s *Service) importWithoutFile(ctx context.Context, in domain.ImportFile, p
 	})
 }
 
+// maxImageBytes keeps the base64 copy well under Mongo's 16 MB document limit.
+const maxImageBytes = 8 << 20
+
+// imageMime recognizes a JPEG or PNG by its magic bytes (the client-sent name/type is not
+// trusted). Empty when the content is not one of those images.
+func imageMime(content []byte) string {
+	switch {
+	case bytes.HasPrefix(content, []byte{0xFF, 0xD8, 0xFF}):
+		return "image/jpeg"
+	case bytes.HasPrefix(content, []byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A}):
+		return "image/png"
+	}
+	return ""
+}
+
 func validImportFile(name, mime string, content []byte) bool {
+	if imageMime(content) != "" {
+		return true
+	}
 	n := strings.ToLower(name + " " + mime)
 	if strings.Contains(n, "pdf") || bytes.HasPrefix(content, []byte("%PDF")) {
 		return true
@@ -291,6 +318,9 @@ type parsedNFe struct {
 }
 
 func parseImport(in domain.ImportFile) parsedNFe {
+	if imageMime(in.Content) != "" {
+		return parsedNFe{Series: "1"}
+	}
 	name := strings.ToLower(in.FileName + " " + in.MimeType)
 	if strings.Contains(name, "pdf") || bytes.HasPrefix(in.Content, []byte("%PDF")) {
 		return parsePDF(in.Content)

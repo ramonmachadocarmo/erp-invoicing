@@ -1,7 +1,9 @@
 package application
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"testing"
 
 	"erp/services/invoicing-service/internal/domain"
@@ -241,6 +243,65 @@ func TestDeleteConfirmedRefused(t *testing.T) {
 func TestDeleteNotFound(t *testing.T) {
 	svc := New(&memInvoices{}, &memDocs{}, &pubSpy{})
 	if err := svc.Delete(context.Background(), "missing"); err != domain.ErrNotFound {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestImportPhotoStoresImageWithoutParsing(t *testing.T) {
+	docs := &memDocs{}
+	svc := New(&memInvoices{}, docs, &pubSpy{})
+	jpeg := append([]byte{0xFF, 0xD8, 0xFF, 0xE0}, []byte("fake-jpeg-body")...)
+	got, err := svc.Import(context.Background(), domain.ImportFile{
+		FileName: "recibo.jpg", MimeType: "image/jpeg", Content: jpeg, Direction: domain.DirectionIn, PurchaseOrderID: "po1",
+	})
+	if err != nil || got.Status != "IMPORTED" || got.Source != domain.SourceImport || got.TotalInvoice != 0 {
+		t.Fatalf("%v %+v", err, got)
+	}
+	doc, err := svc.Document(context.Background(), got.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doc.MimeType != "image/jpeg" || doc.XMLContent != "" || doc.PDFContent != "" {
+		t.Fatalf("%+v", doc)
+	}
+	raw, _ := base64.StdEncoding.DecodeString(doc.ImageContent)
+	if !bytes.Equal(raw, jpeg) {
+		t.Fatalf("image not stored intact")
+	}
+}
+
+func TestImportPhotoTrustsMagicBytesNotName(t *testing.T) {
+	svc := New(&memInvoices{}, &memDocs{}, &pubSpy{})
+	png := append([]byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A}, 1, 2, 3)
+	got, err := svc.Import(context.Background(), domain.ImportFile{
+		FileName: "nota.pdf", MimeType: "application/pdf", Content: png, Direction: domain.DirectionIn, PurchaseOrderID: "po1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, _ := svc.Document(context.Background(), got.ID)
+	if doc.MimeType != "image/png" || doc.ImageContent == "" || doc.PDFContent != "" {
+		t.Fatalf("%+v", doc)
+	}
+}
+
+func TestImportRejectsOversizedPhoto(t *testing.T) {
+	svc := New(&memInvoices{}, &memDocs{}, &pubSpy{})
+	big := append([]byte{0xFF, 0xD8, 0xFF}, make([]byte, maxImageBytes)...)
+	_, err := svc.Import(context.Background(), domain.ImportFile{
+		FileName: "x.jpg", Content: big, Direction: domain.DirectionIn, PurchaseOrderID: "po1",
+	})
+	if err != domain.ErrInvalid {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestImportRejectsBinaryThatIsNotAnImage(t *testing.T) {
+	svc := New(&memInvoices{}, &memDocs{}, &pubSpy{})
+	_, err := svc.Import(context.Background(), domain.ImportFile{
+		FileName: "x.jpg", MimeType: "image/jpeg", Content: []byte{0x00, 0x01, 0x02}, Direction: domain.DirectionIn, PurchaseOrderID: "po1",
+	})
+	if err != domain.ErrInvalid {
 		t.Fatalf("%v", err)
 	}
 }
