@@ -36,13 +36,29 @@ func Consume(client *rabbit.Client, svc *application.Service) error {
 	if err := client.EnsureTopology("invoicing.exchange", "", ""); err != nil {
 		return err
 	}
-	return client.Consume("invoicing.stock-reserved.queue", func(body []byte) error {
+	if err := client.Consume("invoicing.stock-reserved.queue", func(body []byte) error {
 		var ev domain.OrderEvent
 		if err := json.Unmarshal(body, &ev); err != nil {
 			return err
 		}
 		if err := svc.OnStockReserved(context.Background(), ev); err != nil {
 			log.Printf("draft invoice %s: %v", ev.OrderID, err)
+			return err
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	if err := client.EnsureTopology("sales.exchange", "invoicing.order-cancelled.queue", "sales.order.cancelled"); err != nil {
+		return err
+	}
+	return client.Consume("invoicing.order-cancelled.queue", func(body []byte) error {
+		var ev domain.OrderEvent
+		if err := json.Unmarshal(body, &ev); err != nil {
+			return err
+		}
+		if err := svc.OnOrderCancelled(context.Background(), ev); err != nil {
+			log.Printf("void draft invoice for order %s: %v", ev.OrderID, err)
 			return err
 		}
 		return nil

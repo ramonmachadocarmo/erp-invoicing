@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -40,6 +41,26 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 		return domain.ErrInUse
 	}
 	return s.invoices.Delete(ctx, id)
+}
+
+// OnOrderCancelled removes a sales order's draft NFe when the order itself is cancelled or
+// deleted in sales-service — otherwise the draft (auto-created by OnStockReserved as soon as
+// stock reserves, well before cancellation is possible) sits around fully confirmable, letting
+// staff issue a real NFe for an order that no longer exists. Mirrors Delete's own guard: an
+// AUTHORIZED/CONFIRMED invoice is a real fiscal document already, so it's left alone here —
+// unwinding it needs an actual NFe cancellation, not a silent delete.
+func (s *Service) OnOrderCancelled(ctx context.Context, ev domain.OrderEvent) error {
+	inv, err := s.invoices.GetBySalesOrder(ctx, ev.OrderID)
+	if errors.Is(err, domain.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if inv.Status == "AUTHORIZED" || inv.Status == "CONFIRMED" {
+		return nil
+	}
+	return s.invoices.Delete(ctx, inv.ID)
 }
 
 func (s *Service) OnStockReserved(ctx context.Context, ev domain.OrderEvent) error {

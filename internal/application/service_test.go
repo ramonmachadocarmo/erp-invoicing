@@ -64,6 +64,9 @@ func (m *memInvoices) MarkIssued(_ context.Context, id, accessKey, mongoID strin
 	inv.AccessKey = &accessKey
 	inv.MongoXMLID = &mongoID
 	m.byID[id] = inv
+	if inv.SalesOrderID != nil {
+		m.byOrder[*inv.SalesOrderID] = inv
+	}
 	return nil
 }
 
@@ -77,14 +80,21 @@ func (m *memInvoices) MarkConfirmed(_ context.Context, id string) error {
 	}
 	inv.Status = "CONFIRMED"
 	m.byID[id] = inv
+	if inv.SalesOrderID != nil {
+		m.byOrder[*inv.SalesOrderID] = inv
+	}
 	return nil
 }
 
 func (m *memInvoices) Delete(_ context.Context, id string) error {
-	if _, ok := m.byID[id]; !ok {
+	inv, ok := m.byID[id]
+	if !ok {
 		return domain.ErrNotFound
 	}
 	delete(m.byID, id)
+	if inv.SalesOrderID != nil {
+		delete(m.byOrder, *inv.SalesOrderID)
+	}
 	return nil
 }
 
@@ -244,6 +254,45 @@ func TestDeleteNotFound(t *testing.T) {
 	svc := New(&memInvoices{}, &memDocs{}, &pubSpy{})
 	if err := svc.Delete(context.Background(), "missing"); err != domain.ErrNotFound {
 		t.Fatalf("%v", err)
+	}
+}
+
+func TestOnOrderCancelledDeletesDraftInvoice(t *testing.T) {
+	inv := &memInvoices{}
+	svc := New(inv, &memDocs{}, &pubSpy{})
+	if err := svc.OnStockReserved(context.Background(), domain.OrderEvent{OrderID: "so1", TotalAmount: 100}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.OnOrderCancelled(context.Background(), domain.OrderEvent{OrderID: "so1"}); err != nil {
+		t.Fatalf("%v", err)
+	}
+	if _, err := svc.Get(context.Background(), "i1"); err != domain.ErrNotFound {
+		t.Fatalf("expected draft invoice gone, got: %v", err)
+	}
+}
+
+func TestOnOrderCancelledLeavesAuthorizedInvoiceAlone(t *testing.T) {
+	inv := &memInvoices{}
+	svc := New(inv, &memDocs{}, &pubSpy{})
+	if err := svc.OnStockReserved(context.Background(), domain.OrderEvent{OrderID: "so1", TotalAmount: 100}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Issue(context.Background(), "i1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.OnOrderCancelled(context.Background(), domain.OrderEvent{OrderID: "so1"}); err != nil {
+		t.Fatalf("%v", err)
+	}
+	got, err := svc.Get(context.Background(), "i1")
+	if err != nil || got.Status != "AUTHORIZED" {
+		t.Fatalf("expected already-issued invoice untouched, got: %+v, %v", got, err)
+	}
+}
+
+func TestOnOrderCancelledNoDraftIsNoop(t *testing.T) {
+	svc := New(&memInvoices{}, &memDocs{}, &pubSpy{})
+	if err := svc.OnOrderCancelled(context.Background(), domain.OrderEvent{OrderID: "no-draft"}); err != nil {
+		t.Fatalf("expected nil (idempotent no-op), got: %v", err)
 	}
 }
 
