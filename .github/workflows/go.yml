@@ -1,0 +1,87 @@
+name: Go
+
+on:
+  push:
+  pull_request:
+
+# Este repo (services/invoicing-service no monorepo local) depende de erp/pkg via um replace relativo
+# (../../pkg) que so existe dentro do layout completo do monorepo — por isso o job baixa
+# erp-pkg como diretorios irmaos antes de compilar.
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: services/invoicing-service
+      - uses: actions/checkout@v4
+        with:
+          repository: ramonmachadocarmo/erp-pkg
+          path: pkg
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache-dependency-path: services/invoicing-service/go.sum
+      - name: go build
+        working-directory: services/invoicing-service
+        run: go build ./...
+      - name: go vet
+        working-directory: services/invoicing-service
+        run: go vet ./...
+      - name: go test
+        working-directory: services/invoicing-service
+        run: go test ./...
+
+  # So roda no push de uma tag vX.Y.Z (scripts/service-release.sh + service-publish.sh). Builda a
+  # imagem com services/invoicing-service/Dockerfile (copia local de docker/go/Dockerfile — ver 'make sync-dockerfiles'
+  # na raiz do monorepo), publica no ECR com a versao da tag e dispara o rollout no VPS via SSH,
+  # reaproveitando o scripts/vps-release.sh que ja roda la (nao gerencia k8s/ daqui).
+  deploy:
+    environment: production
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: services/invoicing-service
+      - uses: actions/checkout@v4
+        with:
+          repository: ramonmachadocarmo/erp-pkg
+          path: pkg
+      - uses: actions/checkout@v4
+        with:
+          repository: ramonmachadocarmo/erp-schema
+          path: schema
+      - name: Version from tag
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr
+      - name: Build and push image
+        run: |
+          IMAGE="${{ steps.ecr.outputs.registry }}/erp/invoicing-service:${{ steps.ver.outputs.version }}"
+          docker build --platform linux/amd64 -f services/invoicing-service/Dockerfile --build-arg SERVICE=invoicing-service -t "$IMAGE" .
+          docker push "$IMAGE"
+      - name: Rollout on VPS
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: invoicing=${{ steps.ver.outputs.version }} -y
+      - name: Notify Telegram
+        if: always()
+        uses: appleboy/telegram-action@v1.0.0
+        with:
+          to: ${{ secrets.TELEGRAM_CHAT_ID }}
+          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          format: markdown
+          message: |
+            ${{ job.status == 'success' && '✅' || '❌' }} *invoicing-service* `${{ steps.ver.outputs.version }}` — deploy ${{ job.status }}
+            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
